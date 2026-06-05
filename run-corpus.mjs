@@ -19,7 +19,7 @@
 //
 // Env knobs:
 //   CONCURRENCY=4          parallel child processes (WC reports 8 cpus)
-//   TEST_TIMEOUT_MS=60000  per-test wall-clock cap before SIGKILL
+//   TEST_TIMEOUT_MS=30000  per-test wall-clock cap before SIGKILL (then reap)
 //   LIMIT=0                cap number of tests run (0 = no cap)
 //   OUT=results            output directory (relative to cwd)
 //
@@ -47,7 +47,7 @@ const FRESH = opts.includes("--fresh");
 const HELP = opts.includes("--help") || opts.includes("-h");
 
 const CONCURRENCY = parseInt(process.env.CONCURRENCY || "", 10) || 4;
-const TIMEOUT = parseInt(process.env.TEST_TIMEOUT_MS || "", 10) || 60000;
+const TIMEOUT = parseInt(process.env.TEST_TIMEOUT_MS || "", 10) || 30000;
 const LIMIT = parseInt(process.env.LIMIT || "", 10) || 0;
 const outDir = resolve(process.cwd(), process.env.OUT || "results");
 const progressPath = resolve(outDir, "progress.jsonl");
@@ -94,41 +94,78 @@ function readLedger() {
   return map;
 }
 
+// Run one test as its own `node` process, with supervised resolution so a
+// hung test can NEVER wedge its concurrency slot:
+//   - 'close'        → clean finish (process exited + stdio pipes drained)
+//   - 'exit'+grace   → process exited but 'close' lags because a grandchild
+//                      (spawned server/worker) still holds the stdout pipe open
+//   - reap timer     → after the timeout kill, WebContainer may surface neither
+//                      'exit' nor 'close' for a SIGKILL'd child; force-finalize
+// The `settled` guard makes every path idempotent. `detached:true` puts the
+// child in its own process group so hardKill() reaps grandchildren too.
 function runOne(testName) {
-  return new Promise((done) => {
+  return new Promise((resolveOne) => {
     const testPath = resolve(parallelDir, testName);
     let flags = [];
-    try { flags = parseFlags(readFileSync(testPath, "utf8")); } catch { /* unreadable → spawn will fail */ }
+    try { flags = parseFlags(readFileSync(testPath, "utf8")); } catch { /* unreadable → spawn fails below */ }
     const started = Date.now();
-    let out = "", err = "", killed = false;
-    const child = spawn(process.execPath, [...flags, testPath], {
-      cwd: parallelDir,
-      env: process.env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const timer = setTimeout(() => { killed = true; try { child.kill("SIGKILL"); } catch { /* already gone */ } }, TIMEOUT);
-    child.stdout?.on("data", (d) => { if (out.length < OUTPUT_CAP) out += d; });
-    child.stderr?.on("data", (d) => { if (err.length < OUTPUT_CAP) err += d; });
-    child.on("error", (e) => {
-      clearTimeout(timer);
-      done({ test: testName, status: "fail", durationMs: Date.now() - started, exitCode: null, flags, tail: "spawn error: " + e.message });
-    });
-    child.on("close", (code, signal) => {
-      clearTimeout(timer);
-      const durationMs = Date.now() - started;
-      let status;
-      if (killed) status = "timeout";
-      else if (code === 0) status = SKIP_RE.test(out) || SKIP_RE.test(err) ? "skip" : "pass";
-      else status = "fail";
-      const rec = { test: testName, status, durationMs, exitCode: code };
+    let out = "", err = "", killed = false, settled = false;
+    let child, killTimer, reapTimer, graceTimer;
+
+    const hardKill = () => {
+      try { process.kill(-child.pid, "SIGKILL"); } catch { /* no group / unsupported / gone */ }
+      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+    };
+
+    const classify = (code) =>
+      code === 0 ? (SKIP_RE.test(out) || SKIP_RE.test(err) ? "skip" : "pass") : "fail";
+
+    const finalize = (status, code, signal, errorMsg) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(killTimer); clearTimeout(reapTimer); clearTimeout(graceTimer);
+      hardKill(); // best-effort: never leave a process holding WC resources
+      const rec = { test: testName, status, durationMs: Date.now() - started, exitCode: code ?? null };
       if (signal) rec.signal = signal;
       if (flags.length) rec.flags = flags;
       if (status === "fail" || status === "timeout") {
-        const tail = (out + (err ? "\n--- stderr ---\n" + err : "")).trim();
+        let tail = (out + (err ? "\n--- stderr ---\n" + err : "")).trim();
+        if (errorMsg) tail = (errorMsg + (tail ? "\n" + tail : "")).trim();
         rec.tail = tail.length > 1500 ? tail.slice(-1500) : tail;
       }
-      done(rec);
+      resolveOne(rec);
+    };
+
+    try {
+      child = spawn(process.execPath, [...flags, testPath], {
+        cwd: parallelDir,
+        env: process.env,
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: true, // own process group → hardKill can reap grandchildren
+      });
+    } catch (e) {
+      return finalize("fail", null, null, "spawn threw: " + e.message);
+    }
+
+    child.stdout?.on("data", (d) => { if (out.length < OUTPUT_CAP) out += d; });
+    child.stderr?.on("data", (d) => { if (err.length < OUTPUT_CAP) err += d; });
+    child.on("error", (e) => finalize("fail", null, null, "spawn error: " + e.message));
+
+    // Clean path: process exited AND pipes drained.
+    child.on("close", (code, signal) => finalize(killed ? "timeout" : classify(code), code, signal));
+    // Process exited but 'close' is lagging (grandchild holds a pipe): don't
+    // wait forever — finalize a beat later. If 'close' arrives first it wins.
+    child.on("exit", (code, signal) => {
+      graceTimer = setTimeout(() => finalize(killed ? "timeout" : classify(code), code, signal), 250);
     });
+
+    // Hard per-test cap → supervisor. Kill, then force-finalize even if WC
+    // never reports exit/close for the killed child. This is what stops freezes.
+    killTimer = setTimeout(() => {
+      killed = true;
+      hardKill();
+      reapTimer = setTimeout(() => finalize("timeout", null, "SIGKILL"), 3000);
+    }, TIMEOUT);
   });
 }
 

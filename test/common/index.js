@@ -177,7 +177,14 @@ function isPi() {
 }
 
 // When using high concurrency or in the CI we need much more time for each connection attempt
-net.setDefaultAutoSelectFamilyAttemptTimeout(platformTimeout(net.getDefaultAutoSelectFamilyAttemptTimeout() * 10));
+// WebContainer compat: net.getDefaultAutoSelectFamilyAttemptTimeout() returns undefined
+// there, so the computed value is NaN and setDefault throws ERR_OUT_OF_RANGE at load,
+// crashing the whole harness (every test requires this file). Guard so common can load;
+// real autoSelectFamily tests still exercise WC's net and fail honestly. #!~debt wc-net-stub
+const _autoSelectFamilyTimeout = platformTimeout(net.getDefaultAutoSelectFamilyAttemptTimeout() * 10);
+if (Number.isFinite(_autoSelectFamilyTimeout) && _autoSelectFamilyTimeout > 0) {
+  net.setDefaultAutoSelectFamilyAttemptTimeout(_autoSelectFamilyTimeout);
+}
 const defaultAutoSelectFamilyAttemptTimeout = net.getDefaultAutoSelectFamilyAttemptTimeout();
 
 const buildType = process.config.target_defaults ?
