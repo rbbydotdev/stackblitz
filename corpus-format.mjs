@@ -42,13 +42,14 @@ function aggregateByBucket(results) {
     const b = bucketFor(r.test);
     let agg = buckets.get(b);
     if (!agg) {
-      agg = { bucket: b, pass: 0, fail: 0, timeout: 0, skip: 0, total: 0, failingTests: [] };
+      agg = { bucket: b, pass: 0, fail: 0, timeout: 0, crash: 0, skip: 0, total: 0, failingTests: [] };
       buckets.set(b, agg);
     }
     agg.total++;
     if (r.status === "pass") agg.pass++;
     else if (r.status === "skip") agg.skip++;
     else if (r.status === "timeout") { agg.timeout++; agg.failingTests.push(r.test); }
+    else if (r.status === "crash") { agg.crash++; agg.failingTests.push(r.test); }
     else { agg.fail++; agg.failingTests.push(r.test); }
   }
   return [...buckets.values()].sort((a, b) => a.bucket.localeCompare(b.bucket));
@@ -60,6 +61,7 @@ export function writeJsonResults(jsonPath, results, startedAt, finishedAt) {
   const pass = results.filter((r) => r.status === "pass").length;
   const fail = results.filter((r) => r.status === "fail").length;
   const timeout = results.filter((r) => r.status === "timeout").length;
+  const crash = results.filter((r) => r.status === "crash").length;
   const skip = results.filter((r) => r.status === "skip").length;
   const total = results.length;
   const round = (x) => Math.round(x * 10000) / 100;
@@ -72,6 +74,7 @@ export function writeJsonResults(jsonPath, results, startedAt, finishedAt) {
     pass,
     fail,
     timeout,
+    crash,
     skip,
     knownFail: 0,
     knownFailChanged: 0,
@@ -83,6 +86,7 @@ export function writeJsonResults(jsonPath, results, startedAt, finishedAt) {
       pass: a.pass,
       fail: a.fail,
       timeout: a.timeout,
+      crash: a.crash,
       skip: a.skip,
       total: a.total,
       passRate: a.total === 0 ? 0 : round(a.pass / a.total),
@@ -105,15 +109,15 @@ export function writeSummaryMd(mdPath, m) {
     `* Started:    ${new Date(m.startedAt).toISOString()}`,
     `* Finished:   ${new Date(m.finishedAt).toISOString()}`,
     `* Wall clock: ${(m.durationMs / 60000).toFixed(1)} min`,
-    `* Total:      ${m.totalTests} (pass ${m.pass} / fail ${m.fail} / timeout ${m.timeout} / skip ${m.skip})`,
+    `* Total:      ${m.totalTests} (pass ${m.pass} / fail ${m.fail} / timeout ${m.timeout} / crash ${m.crash ?? 0} / skip ${m.skip})`,
     `* Pass rate:  **${m.passRate}%**  (excluding skips: ${m.passRateExclSkip}%)`,
     "",
     "## Per-module pass rates",
     "",
-    "| Module | Pass | Fail | Timeout | Skip | Total | Pass rate |",
-    "|---|---:|---:|---:|---:|---:|---:|",
+    "| Module | Pass | Fail | Timeout | Crash | Skip | Total | Pass rate |",
+    "|---|---:|---:|---:|---:|---:|---:|---:|",
     ...m.perBucket.map(
-      (b) => `| \`${b.bucket}\` | ${b.pass} | ${b.fail} | ${b.timeout} | ${b.skip} | ${b.total} | ${b.passRate}% |`,
+      (b) => `| \`${b.bucket}\` | ${b.pass} | ${b.fail} | ${b.timeout} | ${b.crash ?? 0} | ${b.skip} | ${b.total} | ${b.passRate}% |`,
     ),
     "",
   ];

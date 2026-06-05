@@ -51,20 +51,47 @@ startup (~2 min) + test runtimes; module-by-module is the comfortable way.
 ### Knobs (env vars)
 
 ```sh
-CONCURRENCY=8 node run-corpus.mjs            # WC reports 8 cpus
-TEST_TIMEOUT_MS=30000 node run-corpus.mjs fs # per-test kill cap (default 60s)
+CONCURRENCY=8 node run-corpus.mjs            # parallel children (default 4)
+TEST_TIMEOUT_MS=30000 node run-corpus.mjs fs # per-test kill cap (default 30s)
+STALL_MS=90000 node run-corpus.mjs           # supervisor kill+respawn window
 LIMIT=50 node run-corpus.mjs                  # cap count (quick sample)
-node run-corpus.mjs --fresh                   # ignore prior progress
+node run-corpus.mjs --fresh                   # wipe progress + inflight, restart
 node run-corpus.mjs --list fs                 # print matching tests, don't run
 ```
+
+## Resilience (why it won't lock up)
+
+`run-corpus.mjs` is a **supervisor**; it spawns `corpus-worker.mjs` to run the
+tests and watches `progress.jsonl` grow. Node's own suite contains tests that
+spawn servers/workers/forks — some of which WebContainer can't reap — so a long
+sweep can otherwise wedge the container.
+
+- **Soft stall** (worker still alive but a test is stuck): if progress stops for
+  `STALL_MS`, the supervisor kills the worker's whole process tree and respawns
+  it — automatically, mid-run.
+- **Poison test** (one that wedges WC): every test is written to
+  `results/inflight.json` (with its PID) the moment it starts. Whatever killed
+  it, the next pass marks it **`crash`** and **skips** it, and reaps its orphaned
+  PID — so the sweep steps over it instead of re-hitting it forever.
+- **Total WC freeze** (whole WASM thread starved): the in-process supervisor
+  can't rescue this — **manually restart the StackBlitz container and re-run**.
+  Inflight-skip then steps past the culprit automatically.
+
+> Progress lives in untracked `results/`. If reloading the container resets the
+> filesystem, commit or download `results/progress.jsonl` before restarting so
+> the resume ledger survives.
 
 ## Output
 
 Written to `results/`:
 
-- `corpus-results.json` — full per-test results + per-module aggregates (edgejs schema).
+- `corpus-results.json` — full per-test results + per-module aggregates (edgejs schema; adds `crash`/`skip`).
 - `corpus-summary.md` — human-readable per-module pass-rate table.
 - `progress.jsonl` — append-only resume ledger.
+- `inflight.json` — tests currently running (used by the supervisor to skip wedgers).
+
+Result statuses: `pass` / `fail` / `timeout` (killed at the per-test cap) /
+`crash` (wedged WC, killed+skipped by the supervisor) / `skip` (`common.skip`).
 
 **To get results back:** download `results/corpus-results.json` from the
 StackBlitz file tree (right-click → download), or `cat results/corpus-summary.md`
@@ -87,10 +114,17 @@ failures and are part of the coverage map:
 ## Files
 
 ```
-run-corpus.mjs      the runner (child_process engine)
+run-corpus.mjs      supervisor: ledgers, stall watchdog, inflight-skip recovery
+corpus-worker.mjs   worker: runs `node <test>` per test (child_process engine)
+corpus-lib.mjs      shared helpers (test selection, flag parsing, ledgers)
 corpus-format.mjs   bucketing + summary writer (matches edgejs schema)
 package.json        no deps; `npm run smoke` / `npm run full`
 test/parallel/      3,792 Node test files
-test/common/        test helpers (required by ~all tests)
+test/common/        test helpers (required by ~all tests; index.js has one WC patch)
 test/fixtures/      fixture data (~653 tests need it)
 ```
+
+`test/common/index.js` carries one WebContainer fix: `net.getDefault­AutoSelect­FamilyAttemptTimeout()`
+returns `undefined` in WC, which made the original line throw `ERR_OUT_OF_RANGE`
+at load and fail *every* test; it's guarded to load cleanly (real
+autoSelectFamily tests still run against WC and fail honestly).

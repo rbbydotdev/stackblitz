@@ -1,43 +1,42 @@
 #!/usr/bin/env node
-// run-corpus.mjs — run the Node.js test/parallel corpus inside a StackBlitz
-// WebContainer and emit pass/fail in the edgejs corpus schema.
+// run-corpus.mjs — SUPERVISOR for the Node test/parallel corpus on StackBlitz
+// WebContainer. It owns the ledgers and keeps the sweep making forward progress
+// no matter how badly a test misbehaves:
 //
-// Engine: one real `node <testfile>` child process per test. Chosen after
-// probing the live WebContainer (probe.mjs):
-//   - child_process spawn ≈ 28 ms vs worker_threads ≈ 132 ms per test
-//   - per-test `// Flags:` are honored as real argv (worker execArgv is
-//     SILENTLY DROPPED in WC), and exit codes + process.on('exit')/mustCall
-//     verification are the genuine article — no hidden-pass inflation.
+//   - It spawns corpus-worker.mjs to actually run tests (one real `node` per
+//     test; engine chosen via probe.mjs — child_process ≈ 28ms vs worker 132ms,
+//     and `// Flags:` are honored as real argv).
+//   - It watches progress.jsonl grow. If progress stalls for STALL_MS, it kills
+//     the worker's whole process tree (+ any test PIDs from inflight.json) and
+//     respawns — auto-recovering soft hangs with no babysitting.
+//   - Any test that was in-flight when a worker/the container died is marked
+//     `crash` and SKIPPED on the next pass, so a poison test that wedges WC is
+//     stepped over instead of re-hit forever. (A *total* WC freeze still needs a
+//     manual container restart + re-run; after that, inflight-skip carries on.)
 //
 // Usage:
-//   node run-corpus.mjs                       # full test/parallel corpus
-//   node run-corpus.mjs fs                     # only names containing "fs"
+//   node run-corpus.mjs                       # full corpus
+//   node run-corpus.mjs fs                     # names containing "fs"
 //   node run-corpus.mjs test-fs- test-buffer-  # multiple filters (OR)
-//   node run-corpus.mjs --list fs              # print the matching list, don't run
-//   node run-corpus.mjs --fresh                # ignore prior progress, start over
+//   node run-corpus.mjs --list fs              # print matching tests, don't run
+//   node run-corpus.mjs --fresh                # wipe progress + inflight, restart
 //   node run-corpus.mjs --help
 //
 // Env knobs:
-//   CONCURRENCY=4          parallel child processes (WC reports 8 cpus)
+//   CONCURRENCY=4          parallel child processes in the worker
 //   TEST_TIMEOUT_MS=30000  per-test wall-clock cap before SIGKILL (then reap)
-//   LIMIT=0                cap number of tests run (0 = no cap)
+//   STALL_MS=90000         no-progress window before the supervisor kills+respawns
+//                          the worker (must exceed TEST_TIMEOUT_MS)
+//   LIMIT=0                cap number of tests (0 = no cap)
 //   OUT=results            output directory (relative to cwd)
-//
-// Resumability: every finished test appends one line to <OUT>/progress.jsonl;
-// a re-run skips tests already recorded there (so Ctrl-C is safe). `--fresh`
-// wipes the ledger first.
+//   MAX_NOPROGRESS=4       consecutive no-progress worker cycles before giving up
 
-import {
-  readFileSync, readdirSync, existsSync, appendFileSync, mkdirSync, rmSync,
-} from "node:fs";
-import { resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readFileSync, appendFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { resolve } from "node:path";
 import { spawn } from "node:child_process";
 import os from "node:os";
+import { here, outPaths, selectTests, readLedger, readInflight } from "./corpus-lib.mjs";
 import { writeJsonResults, writeSummaryMd } from "./corpus-format.mjs";
-
-const here = dirname(fileURLToPath(import.meta.url));
-const parallelDir = resolve(here, "test", "parallel");
 
 const argv = process.argv.slice(2);
 const opts = argv.filter((a) => a.startsWith("--"));
@@ -48,138 +47,93 @@ const HELP = opts.includes("--help") || opts.includes("-h");
 
 const CONCURRENCY = parseInt(process.env.CONCURRENCY || "", 10) || 4;
 const TIMEOUT = parseInt(process.env.TEST_TIMEOUT_MS || "", 10) || 30000;
+const STALL_MS = parseInt(process.env.STALL_MS || "", 10) || Math.max(90000, TIMEOUT * 2 + 15000);
 const LIMIT = parseInt(process.env.LIMIT || "", 10) || 0;
+const MAX_NOPROGRESS = parseInt(process.env.MAX_NOPROGRESS || "", 10) || 4;
 const outDir = resolve(process.cwd(), process.env.OUT || "results");
-const progressPath = resolve(outDir, "progress.jsonl");
-const resultsPath = resolve(outDir, "corpus-results.json");
-const summaryPath = resolve(outDir, "corpus-summary.md");
+const { progressPath, inflightPath, resultsPath, summaryPath } = outPaths(outDir);
 
-const SKIP_RE = /^1\.\.0\s*#\s*skip/im; // common.skip() prints "1..0 # Skipped: <reason>"
-const OUTPUT_CAP = 200_000; // bytes captured per stream before we stop appending
+const cfg = { filters, limit: LIMIT, timeout: TIMEOUT, concurrency: CONCURRENCY, outDir };
 
 function usage() {
-  console.log(readFileSync(fileURLToPath(import.meta.url), "utf8")
+  console.log(readFileSync(new URL(import.meta.url), "utf8")
     .split("\n").filter((l) => l.startsWith("//")).map((l) => l.slice(3)).join("\n"));
 }
 
-function selectTests() {
-  let tests = readdirSync(parallelDir)
-    .filter((f) => f.startsWith("test-") && f.endsWith(".js"))
-    .filter((f) => filters.length === 0 || filters.some((s) => f.includes(s)))
-    .sort();
-  if (LIMIT > 0) tests = tests.slice(0, LIMIT);
-  return tests;
+const appendProgress = (rec) => appendFileSync(progressPath, JSON.stringify(rec) + "\n");
+const clearInflight = () => { try { writeFileSync(inflightPath, "[]"); } catch { /* ignore */ } };
+
+// Kill a test's whole process group (it was spawned detached), best effort.
+function reapPid(pid) {
+  if (!pid) return;
+  try { process.kill(-pid, "SIGKILL"); } catch { /* gone / no group */ }
+  try { process.kill(pid, "SIGKILL"); } catch { /* gone */ }
 }
 
-// Collect every `// Flags: ...` line from a test header and flatten to argv.
-function parseFlags(src) {
-  const flags = [];
-  const re = /^\/\/ Flags:(.*)$/gm;
-  let m;
-  while ((m = re.exec(src))) {
-    for (const f of m[1].trim().split(/\s+/)) if (f) flags.push(f);
+// Mark the in-flight tests recorded by a dead worker as `crash` so they're
+// skipped next pass, and reap any orphaned process groups. Returns marked names.
+function harvestInflight(reason, onlyOldest) {
+  const inflight = readInflight(inflightPath);
+  const done = readLedger(progressPath);
+  for (const e of inflight) reapPid(e.pid);
+  let targets = inflight.filter((e) => !done.has(e.test));
+  if (onlyOldest && targets.length > 1) {
+    targets = [targets.slice().sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0))[0]];
   }
-  return flags;
-}
-
-// Read the resume ledger; last line wins per test, partial/corrupt lines skipped.
-function readLedger() {
-  const map = new Map();
-  if (!existsSync(progressPath)) return map;
-  for (const line of readFileSync(progressPath, "utf8").split("\n")) {
-    const t = line.trim();
-    if (!t) continue;
-    try { const e = JSON.parse(t); if (e && e.test) map.set(e.test, e); } catch { /* partial line */ }
+  const marked = [];
+  for (const e of targets) {
+    appendProgress({ test: e.test, status: "crash", durationMs: 0, note: reason });
+    marked.push(e.test);
   }
-  return map;
+  clearInflight();
+  return marked;
 }
 
-// Run one test as its own `node` process, with supervised resolution so a
-// hung test can NEVER wedge its concurrency slot:
-//   - 'close'        → clean finish (process exited + stdio pipes drained)
-//   - 'exit'+grace   → process exited but 'close' lags because a grandchild
-//                      (spawned server/worker) still holds the stdout pipe open
-//   - reap timer     → after the timeout kill, WebContainer may surface neither
-//                      'exit' nor 'close' for a SIGKILL'd child; force-finalize
-// The `settled` guard makes every path idempotent. `detached:true` puts the
-// child in its own process group so hardKill() reaps grandchildren too.
-function runOne(testName) {
-  return new Promise((resolveOne) => {
-    const testPath = resolve(parallelDir, testName);
-    let flags = [];
-    try { flags = parseFlags(readFileSync(testPath, "utf8")); } catch { /* unreadable → spawn fails below */ }
-    const started = Date.now();
-    let out = "", err = "", killed = false, settled = false;
-    let child, killTimer, reapTimer, graceTimer;
-
-    const hardKill = () => {
-      try { process.kill(-child.pid, "SIGKILL"); } catch { /* no group / unsupported / gone */ }
-      try { child.kill("SIGKILL"); } catch { /* already gone */ }
-    };
-
-    const classify = (code) =>
-      code === 0 ? (SKIP_RE.test(out) || SKIP_RE.test(err) ? "skip" : "pass") : "fail";
-
-    const finalize = (status, code, signal, errorMsg) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(killTimer); clearTimeout(reapTimer); clearTimeout(graceTimer);
-      hardKill(); // best-effort: never leave a process holding WC resources
-      const rec = { test: testName, status, durationMs: Date.now() - started, exitCode: code ?? null };
-      if (signal) rec.signal = signal;
-      if (flags.length) rec.flags = flags;
-      if (status === "fail" || status === "timeout") {
-        let tail = (out + (err ? "\n--- stderr ---\n" + err : "")).trim();
-        if (errorMsg) tail = (errorMsg + (tail ? "\n" + tail : "")).trim();
-        rec.tail = tail.length > 1500 ? tail.slice(-1500) : tail;
-      }
-      resolveOne(rec);
-    };
-
-    try {
-      child = spawn(process.execPath, [...flags, testPath], {
-        cwd: parallelDir,
-        env: process.env,
-        stdio: ["ignore", "pipe", "pipe"],
-        detached: true, // own process group → hardKill can reap grandchildren
-      });
-    } catch (e) {
-      return finalize("fail", null, null, "spawn threw: " + e.message);
-    }
-
-    child.stdout?.on("data", (d) => { if (out.length < OUTPUT_CAP) out += d; });
-    child.stderr?.on("data", (d) => { if (err.length < OUTPUT_CAP) err += d; });
-    child.on("error", (e) => finalize("fail", null, null, "spawn error: " + e.message));
-
-    // Clean path: process exited AND pipes drained.
-    child.on("close", (code, signal) => finalize(killed ? "timeout" : classify(code), code, signal));
-    // Process exited but 'close' is lagging (grandchild holds a pipe): don't
-    // wait forever — finalize a beat later. If 'close' arrives first it wins.
-    child.on("exit", (code, signal) => {
-      graceTimer = setTimeout(() => finalize(killed ? "timeout" : classify(code), code, signal), 250);
-    });
-
-    // Hard per-test cap → supervisor. Kill, then force-finalize even if WC
-    // never reports exit/close for the killed child. This is what stops freezes.
-    killTimer = setTimeout(() => {
-      killed = true;
-      hardKill();
-      reapTimer = setTimeout(() => finalize("timeout", null, "SIGKILL"), 3000);
-    }, TIMEOUT);
+function spawnWorker() {
+  return spawn(process.execPath, [resolve(here, "corpus-worker.mjs")], {
+    cwd: here,
+    detached: true, // own process group → we can nuke the whole tree on stall
+    stdio: ["ignore", "inherit", "inherit"],
+    env: { ...process.env, CORPUS_CFG: JSON.stringify(cfg) },
   });
 }
 
-async function runPool(items, concurrency, worker) {
-  let i = 0;
-  await Promise.all(Array.from({ length: concurrency }, async () => {
-    while (i < items.length) { const idx = i++; await worker(items[idx]); }
-  }));
+function writeOutputs(startedAt) {
+  const ledger = readLedger(progressPath);
+  const all = selectTests(filters, LIMIT);
+  const results = all.filter((t) => ledger.has(t)).map((t) => ledger.get(t));
+  const summary = writeJsonResults(resultsPath, results, startedAt, Date.now());
+  writeSummaryMd(summaryPath, summary);
+  return summary;
+}
+
+async function runWorkerOnce() {
+  // Returns "done" | "stall" | "exit:<code>"
+  const worker = spawnWorker();
+  return await new Promise((res) => {
+    let lastCount = readLedger(progressPath).size;
+    let lastGrow = Date.now();
+    const poll = setInterval(() => {
+      const count = readLedger(progressPath).size;
+      if (count > lastCount) { lastCount = count; lastGrow = Date.now(); }
+      if (Date.now() - lastGrow > STALL_MS) {
+        clearInterval(poll);
+        try { process.kill(-worker.pid, "SIGKILL"); } catch { /* ignore */ }
+        try { worker.kill("SIGKILL"); } catch { /* ignore */ }
+        res("stall");
+      }
+    }, 3000);
+    worker.once("exit", (code, signal) => {
+      clearInterval(poll);
+      res(code === 0 ? "done" : `exit:${code ?? signal}`);
+    });
+  });
 }
 
 async function main() {
   if (HELP) { usage(); return; }
   mkdirSync(outDir, { recursive: true });
-  const all = selectTests();
+  const all = selectTests(filters, LIMIT);
 
   if (LIST_ONLY) {
     for (const t of all) console.log(t);
@@ -187,32 +141,58 @@ async function main() {
     return;
   }
 
-  if (FRESH) { try { rmSync(progressPath, { force: true }); } catch { /* none */ } }
-  const done = readLedger();
-  const todo = all.filter((t) => !done.has(t));
+  if (FRESH) {
+    try { rmSync(progressPath, { force: true }); } catch { /* none */ }
+    try { rmSync(inflightPath, { force: true }); } catch { /* none */ }
+  }
 
-  console.log(`[corpus] node ${process.version} ${process.platform}/${process.arch}, cpus=${os.cpus().length}`);
-  console.log(`[corpus] engine=child_process concurrency=${CONCURRENCY} timeout=${TIMEOUT}ms`);
-  console.log(`[corpus] ${all.length} selected, ${done.size} already done, ${todo.length} to run\n`);
+  console.log(`[supervisor] node ${process.version} ${process.platform}/${process.arch}, cpus=${os.cpus().length}`);
+  console.log(`[supervisor] concurrency=${CONCURRENCY} per-test-timeout=${TIMEOUT}ms stall=${STALL_MS}ms`);
+
+  // Recover poison tests left in-flight by a prior crashed/frozen run.
+  const recovered = harvestInflight("in-flight when a prior run died; skipped to make progress", false);
+  if (recovered.length) {
+    console.log(`[supervisor] skipped ${recovered.length} suspected wedger(s) from a prior run: ${recovered.join(", ")}`);
+  }
 
   const startedAt = Date.now();
-  let n = 0;
-  await runPool(todo, CONCURRENCY, async (testName) => {
-    const rec = await runOne(testName);
-    appendFileSync(progressPath, JSON.stringify(rec) + "\n");
-    n++;
-    console.log(`[${String(n).padStart(4)}/${todo.length}] ${rec.status.toUpperCase().padEnd(7)} ${rec.test} (${rec.durationMs}ms)`);
-  });
-  const finishedAt = Date.now();
+  let noProgressCycles = 0;
 
-  // Merge the full ledger (prior + this run) into the schema'd outputs.
-  const ledger = readLedger();
-  const results = all.filter((t) => ledger.has(t)).map((t) => ledger.get(t));
-  const summary = writeJsonResults(resultsPath, results, startedAt, finishedAt);
-  writeSummaryMd(summaryPath, summary);
+  while (true) {
+    const done = readLedger(progressPath);
+    const remaining = all.filter((t) => !done.has(t));
+    if (remaining.length === 0) break;
 
+    console.log(`[supervisor] ${all.length} selected, ${done.size} done, ${remaining.length} remaining — launching worker`);
+    const before = done.size;
+    const result = await runWorkerOnce();
+    const after = readLedger(progressPath).size;
+
+    if (result === "stall") {
+      const marked = harvestInflight(`stalled WC for >${STALL_MS}ms; killed + skipped`, true);
+      console.log(`[supervisor] STALL — killed worker tree${marked.length ? `, skipping poison: ${marked.join(", ")}` : ""}`);
+    } else if (result.startsWith("exit:")) {
+      const marked = harvestInflight(`worker exited abnormally (${result}); skipped`, true);
+      console.log(`[supervisor] worker ${result}${marked.length ? `, skipping poison: ${marked.join(", ")}` : ""}`);
+    } else {
+      clearInflight(); // clean exit
+    }
+
+    if (after <= before && result !== "done") {
+      noProgressCycles++;
+      if (noProgressCycles >= MAX_NOPROGRESS) {
+        console.error(`[supervisor] no progress for ${MAX_NOPROGRESS} cycles — aborting. ` +
+          `Restart the WebContainer and re-run; progress is saved.`);
+        break;
+      }
+    } else {
+      noProgressCycles = 0;
+    }
+  }
+
+  const summary = writeOutputs(startedAt);
   console.log(`\n=== pass rate: ${summary.passRate}%  (${summary.pass}/${summary.totalTests}, excl-skip ${summary.passRateExclSkip}%) ===`);
-  console.log(`pass ${summary.pass}  fail ${summary.fail}  timeout ${summary.timeout}  skip ${summary.skip}\n`);
+  console.log(`pass ${summary.pass}  fail ${summary.fail}  timeout ${summary.timeout}  crash ${summary.crash}  skip ${summary.skip}\n`);
   console.log("per-module:");
   for (const b of summary.perBucket) {
     console.log(`  ${b.bucket.padEnd(20)} ${String(b.pass).padStart(4)}/${String(b.total).padEnd(4)} (${b.passRate}%)`);
