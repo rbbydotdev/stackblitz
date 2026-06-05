@@ -1,0 +1,33 @@
+corpus-lib.mjs
+  s_aae3c9af80648f::t_c01c3058814b25 1-63
+run-corpus.mjs
+  s_aae3c9af80648f::t_0d0114e0216af0 34
+  s_aae3c9af80648f::t_9b3b372d0a574e 2-4,6-15,18-19,21-22,26,28-30,32-33,35,38,50,52,54,56,59,63-64,66-70,73-86,88-89,92-99,101-108,110-128,136,144-147,149-156,159-179,181-191,193,195
+corpus-format.mjs
+  s_aae3c9af80648f::t_b5fe62dd7e07fd 45,52
+  s_aae3c9af80648f::t_0491dd1621bd60 112,117-118,120
+  s_aae3c9af80648f::t_6a5efea2aeb817 77,89
+  s_aae3c9af80648f::t_cc7a82eff668be 64
+corpus-worker.mjs
+  s_aae3c9af80648f::t_236dd279d711e6 1-117
+README.md
+  s_aae3c9af80648f::t_18b073dde963cf 88,91-94
+  s_aae3c9af80648f::t_26b935373ca149 117-119,123,126-130
+  s_aae3c9af80648f::t_f30b572ab8dd43 54-56,58,62-82
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "9c785ce382d9e3a3fe5d901806a555b9820750b4",
+  "prompts": {},
+  "sessions": {
+    "s_aae3c9af80648f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "afd75176-0900-4d50-a63c-e6b32e4da053",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
