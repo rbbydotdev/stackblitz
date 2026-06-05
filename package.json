@@ -1,0 +1,15 @@
+{
+  "name": "edgejs-webcontainer-corpus",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "description": "Run the Node.js test/parallel corpus inside a StackBlitz WebContainer to measure native coverage (baseline for edgejs-web).",
+  "scripts": {
+    "start": "node run-corpus.mjs --help",
+    "smoke": "node run-corpus.mjs test-path-",
+    "full": "node run-corpus.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,13 @@
+'use strict';
+require('../common');
+const assert = require('assert');
+const EventEmitter = require('events');
+const proto = Object.getPrototypeOf(process);
+console.log('protoInst=' + String(proto instanceof EventEmitter));
+console.log('procInst=' + String(process instanceof process.constructor));
+console.log('ctorName=' + String(process.constructor && process.constructor.name));
+console.log('protoCtor=' + String(proto && proto.constructor && proto.constructor.name));
+console.log('protoProtoCtor=' + String(Object.getPrototypeOf(proto) && Object.getPrototypeOf(proto).constructor && Object.getPrototypeOf(proto).constructor.name));
+console.log('eq=' + String(Object.getPrototypeOf(proto) === EventEmitter.prototype));
+assert(process instanceof process.constructor);
+assert(proto instanceof EventEmitter);

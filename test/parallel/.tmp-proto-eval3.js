@@ -1,0 +1,12 @@
+'use strict';
+require('../common');
+const EE = require('events');
+const proto = Object.getPrototypeOf(process);
+const ctor = process.constructor;
+const v1 = process instanceof ctor;
+const v2 = process instanceof EE;
+const v3 = proto instanceof EE;
+const v4 = ctor === EE;
+const v5 = Object.getPrototypeOf(proto) === EE.prototype;
+const v6 = Object.prototype.hasOwnProperty.call(proto, 'constructor');
+throw new Error(`vals:${v1},${v2},${v3},${v4},${v5},${v6},ctor=${ctor && ctor.name}`);
