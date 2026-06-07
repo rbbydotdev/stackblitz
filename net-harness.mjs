@@ -40,7 +40,7 @@ const crossProc = (mode, port) => new Promise((res) => {
 // probe wrapper: fn(setCleanup) → resolve {result,detail} | throw (FAIL) | never (HANG)
 async function probe(name, note, fn) {
   let cleanup = () => {};
-  const timeout = new Promise((r) => setTimeout(() => r({ result: "HANG", detail: `no result in ${PROBE_MS}ms (likely host-gate fallback)` }), PROBE_MS));
+  const timeout = new Promise((r) => setTimeout(() => r({ result: "HANG", detail: `no result in ${PROBE_MS}ms (hung — an expected event never fired, or host-gated)` }), PROBE_MS));
   let out;
   try {
     out = await Promise.race([
@@ -105,8 +105,13 @@ const probes = [
       }); }).on("error", rej);
     });
   })],
-  ["client abort mid-flight", "req.destroy() → server 'aborted'", (cln) => new Promise((res, rej) => {
-    const s = httpServer((req) => { req.on("aborted", () => res({ result: "OK", detail: "server saw abort" })); }); cln(() => s.close());
+  ["client abort mid-flight", "req.destroy() → server detects abort", (cln) => new Promise((res, rej) => {
+    // detect via the modern 'close'+destroyed path OR the deprecated 'aborted'
+    const s = httpServer((req) => {
+      const done = (how) => res({ result: "OK", detail: "server detected abort via " + how });
+      req.on("aborted", () => done("aborted"));
+      req.on("close", () => { if (req.destroyed || req.aborted) done("close+destroyed"); });
+    }); cln(() => s.close());
     s.on("error", rej);
     s.listen(0, "127.0.0.1", () => { const req = http.get({ port: s.address().port }, () => {}); req.on("error", () => {}); setTimeout(() => req.destroy(), 150); });
   })],
@@ -123,7 +128,7 @@ const probes = [
   ["raw net → http server", "net.connect + raw GET to http", (cln) => new Promise((res, rej) => {
     const s = httpServer((_q, r) => r.end("raw")); cln(() => s.close());
     s.on("error", rej);
-    s.listen(0, "127.0.0.1", () => { const c = net.connect(s.address().port, "127.0.0.1", () => c.write("GET / HTTP/1.0\r\n\r\n")); let d = ""; c.on("data", (x) => d += x); c.on("end", () => res({ result: /raw/.test(d) ? "OK" : "FAIL", detail: d.split("\r\n")[0] })); c.on("error", rej); });
+    s.listen(0, "127.0.0.1", () => { const c = net.connect(s.address().port, "127.0.0.1", () => c.write("GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")); let d = ""; c.on("data", (x) => d += x); c.on("end", () => res({ result: /raw/.test(d) ? "OK" : "FAIL", detail: d.split("\r\n")[0] })); c.on("error", rej); });
   })],
 
   // ---- binding ----
