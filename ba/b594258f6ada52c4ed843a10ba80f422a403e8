@@ -1,0 +1,19 @@
+run-corpus.mjs
+  s_aae3c9af80648f::t_dfb33c26cec2d5 167-174
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "bab594258f6ada52c4ed843a10ba80f422a403e8",
+  "prompts": {},
+  "sessions": {
+    "s_aae3c9af80648f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "afd75176-0900-4d50-a63c-e6b32e4da053",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
