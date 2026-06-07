@@ -1,0 +1,21 @@
+serve-matrix.mjs
+  s_aae3c9af80648f::t_eb78911f8491ec 1-24
+.stackblitzrc
+  s_aae3c9af80648f::t_2c382bfb908332 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "d90021133e37e03fcd09a2537c0e35e63c5e05ca",
+  "prompts": {},
+  "sessions": {
+    "s_aae3c9af80648f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "afd75176-0900-4d50-a63c-e6b32e4da053",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
