@@ -17,6 +17,14 @@ import dgram from "node:dgram";
 import { spawn } from "node:child_process";
 import { writeFileSync, unlinkSync } from "node:fs";
 
+// WC's subsystem stubs can throw ASYNCHRONOUSLY (e.g. http2 session destroy
+// after a setup error) — outside any probe's handler. Without this, one bad
+// subsystem crashes the whole matrix. The probe's own handler still records the
+// real FAIL; this only stops the escaped secondary throw from killing the run.
+let lastUncaught = null;
+process.on("uncaughtException", (e) => { lastUncaught = e && (e.message || String(e)); });
+process.on("unhandledRejection", (e) => { lastUncaught = e && (e.message || String(e)); });
+
 const PROBE_MS = 4000;
 const CHILD = new URL("./_net_harness_child.cjs", import.meta.url).pathname;
 writeFileSync(CHILD, `
