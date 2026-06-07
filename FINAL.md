@@ -183,6 +183,24 @@ node browser-target/scripts/corpus-compare.mjs   # regenerates stackblitz-gap.tx
 5. **Re-measure after each** — run the gap group through edgejs and re-diff; the
    gap count is the parity score.
 
+### The fix loop (what to run repeatedly)
+
+The corpus collection to iterate on is `corpus-groups/stackblitz-gap.txt` (the 365
+WC-pass / edge-fail tests, each annotated with its failure reason). After every
+code change:
+
+```sh
+cd browser-target
+# run the remaining gap tests through edgejs (resumable; FRESH=1 to re-run all):
+npm run corpus:pick -- --group=stackblitz-gap --label=stackblitz-gap
+# re-diff → regenerates stackblitz-gap.txt smaller (and the parity score):
+node scripts/corpus-compare.mjs
+```
+
+`stackblitz-passing.txt` (1,672) is the full target set — run it for a clean
+parity number or a regression check; `stackblitz-gap.txt` shrinks as you fix.
+**Parity = (1,672 − gap) / 1,672.**
+
 **Optional / later:** edge could *exceed* WC on tls/http2 (real OpenSSL wasm) — a
 "beat WC," not "match WC," campaign.
 
