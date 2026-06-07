@@ -37,6 +37,22 @@ const crossProc = (mode, port) => new Promise((res) => {
   setTimeout(() => { try { ch.kill("SIGKILL"); } catch {} }, PROBE_MS - 200);
 });
 
+// cluster.fork re-runs the whole script, so isolate it in a child that does the
+// fork + shared-server dance and prints "clu" on success.
+const CLUSTER_CHILD = new URL("./_cluster_probe.cjs", import.meta.url).pathname;
+writeFileSync(CLUSTER_CHILD, `
+const cluster = require("cluster"); const http = require("http");
+if (cluster.isPrimary || cluster.isMaster) {
+  setTimeout(() => process.exit(3), 3500);
+  const w = cluster.fork();
+  cluster.on("listening", (worker, address) => {
+    http.get({ host: "127.0.0.1", port: address.port }, r => { let d=""; r.on("data",c=>d+=c); r.on("end",()=>{ process.stdout.write(d); try{w.kill()}catch{} ; process.exit(0); }); }).on("error", e => { process.stderr.write(e.message); process.exit(1); });
+  });
+} else {
+  http.createServer((q, r) => r.end("clu")).listen(0, "127.0.0.1");
+}
+`);
+
 // probe wrapper: fn(setCleanup) → resolve {result,detail} | throw (FAIL) | never (HANG)
 async function probe(name, note, fn) {
   let cleanup = () => {};
@@ -157,6 +173,57 @@ const probes = [
     s.on("error", rej);
     s.listen(0, "127.0.0.1", () => { const req = http.request({ port: s.address().port, headers: { Connection: "Upgrade", Upgrade: "websocket" } }); req.on("error", () => {}); req.end(); });
   })],
+
+  // ---- subsystems (173+ of the WC net-timeouts hinge on these — never probed) ----
+  ["http2 loopback (h2c)", "HTTP/2 cleartext server+client", async (cln) => {
+    const http2 = (await import("node:http2")).default;
+    return await new Promise((res, rej) => {
+      const s = http2.createServer(); cln(() => { try { s.close(); } catch {} });
+      s.on("error", rej);
+      s.on("stream", (stream) => { stream.respond({ ":status": 200 }); stream.end("h2"); });
+      s.listen(0, "127.0.0.1", () => {
+        const client = http2.connect("http://127.0.0.1:" + s.address().port);
+        client.on("error", rej);
+        const req = client.request({ ":path": "/" });
+        let d = ""; req.on("data", (c) => d += c);
+        req.on("end", () => { res({ result: d === "h2" ? "OK" : "FAIL", detail: d }); try { client.close(); } catch {} });
+        req.end();
+      });
+    });
+  }],
+  ["tls loopback", "self-signed server+client (fixture cert)", async (cln) => {
+    const tls = (await import("node:tls")).default;
+    const fs = (await import("node:fs")).default;
+    let key, cert;
+    try {
+      const dir = new URL("./test/fixtures/keys/", import.meta.url);
+      key = fs.readFileSync(new URL("agent1-key.pem", dir));
+      cert = fs.readFileSync(new URL("agent1-cert.pem", dir));
+    } catch (e) { return { result: "FAIL", detail: "no fixture keys: " + e.message }; }
+    return await new Promise((res, rej) => {
+      const s = tls.createServer({ key, cert }, (sock) => { sock.end("tls"); }); cln(() => { try { s.close(); } catch {} });
+      s.on("error", rej);
+      s.listen(0, "127.0.0.1", () => {
+        const c = tls.connect({ port: s.address().port, host: "127.0.0.1", rejectUnauthorized: false });
+        let d = ""; c.on("data", (x) => d += x); c.on("end", () => res({ result: d === "tls" ? "OK" : "FAIL", detail: d })); c.on("error", rej);
+      });
+    });
+  }],
+  ["cluster fork+shared server", "worker http server reachable from primary", () => new Promise((res) => {
+    const ch = spawn(process.execPath, [CLUSTER_CHILD], { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "", err = ""; ch.stdout.on("data", (d) => out += d); ch.stderr.on("data", (d) => err += d);
+    ch.on("close", (code) => res({ result: out.trim() === "clu" ? "OK" : "FAIL", detail: `code=${code} ${out.trim() || err.slice(0, 50)}` }));
+    setTimeout(() => { try { ch.kill("SIGKILL"); } catch {} }, PROBE_MS - 200);
+  })],
+  ["dns.lookup localhost", "resolve localhost → loopback", async () => {
+    const dns = (await import("node:dns")).default;
+    return await new Promise((res) => {
+      dns.lookup("localhost", (err, addr) => {
+        if (err) res({ result: "FAIL", detail: err.code || err.message });
+        else res({ result: /^127\.|::1/.test(String(addr)) ? "OK" : "FAIL", detail: String(addr) });
+      });
+    });
+  }],
 ];
 
 const want = process.argv.includes("--json");
@@ -167,11 +234,12 @@ console.log(`\nnetworking capability matrix — node ${process.version} ${proces
 const icon = (r) => (r === "OK" ? "✅" : r === "HANG" ? "⛔HANG" : "❌FAIL");
 for (const r of results) console.log(`${icon(r.result).padEnd(7)} ${r.name.padEnd(26)} ${r.note}${r.detail ? "  — " + r.detail : ""}`);
 const c = (s) => results.filter((r) => r.result === s).length;
-console.log(`\nOK ${c("OK")}  HANG ${c("HANG")}  FAIL ${c("FAIL")}   (HANG = bounced to host gate; OK = in-container)`);
+console.log(`\nOK ${c("OK")}  HANG ${c("HANG")}  FAIL ${c("FAIL")}   (OK = WC supports it in-container, no Pro; HANG/FAIL = WC gap or our harness)`);
 
 if (want) {
   writeFileSync(new URL("./net-capabilities.json", import.meta.url), JSON.stringify({ runtime: process.version, platform: `${process.platform}/${process.arch}`, results }, null, 2) + "\n");
   console.log("\nwrote net-capabilities.json");
 }
 try { unlinkSync(CHILD); } catch {}
+try { unlinkSync(CLUSTER_CHILD); } catch {}
 process.exit(0); // probes leave open handles (servers/agents/dgram); exit cleanly
