@@ -11,10 +11,10 @@
 import { readFileSync, appendFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawn } from "node:child_process";
-import { parallelDir, outPaths, selectTests, parseFlags, readLedger } from "./corpus-lib.mjs";
+import { parallelDir, outPaths, resolveTestSet, parseFlags, readLedger } from "./corpus-lib.mjs";
 
 const cfg = JSON.parse(process.env.CORPUS_CFG || "{}");
-const { filters = [], limit = 0, timeout = 30000, concurrency = 4, outDir = "results" } = cfg;
+const { filters = [], limit = 0, timeout = 30000, concurrency = 4, outDir = "results", listFile = null } = cfg;
 const { progressPath, inflightPath } = outPaths(outDir);
 
 const SKIP_RE = /^1\.\.0\s*#\s*skip/im;
@@ -96,7 +96,7 @@ async function runPool(items, conc, work) {
 }
 
 async function main() {
-  const all = selectTests(filters, limit);
+  const all = resolveTestSet({ listFile, filters, limit });
   const done = readLedger(progressPath); // includes crash-marked tests → skipped
   const todo = all.filter((t) => !done.has(t));
   writeInflight(); // start clean ([])

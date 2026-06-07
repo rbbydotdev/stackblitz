@@ -18,6 +18,7 @@
 //   node run-corpus.mjs                       # full corpus
 //   node run-corpus.mjs fs                     # names containing "fs"
 //   node run-corpus.mjs test-fs- test-buffer-  # multiple filters (OR)
+//   node run-corpus.mjs --manifest=<file>      # run exactly the ids in <file> (one/line, # comments)
 //   node run-corpus.mjs --list fs              # print matching tests, don't run
 //   node run-corpus.mjs --fresh                # wipe progress + inflight, restart
 //   node run-corpus.mjs --help
@@ -35,7 +36,7 @@ import { readFileSync, appendFileSync, writeFileSync, mkdirSync, rmSync } from "
 import { resolve } from "node:path";
 import { spawn } from "node:child_process";
 import os from "node:os";
-import { here, outPaths, selectTests, readLedger, readInflight } from "./corpus-lib.mjs";
+import { here, outPaths, resolveTestSet, readLedger, readInflight } from "./corpus-lib.mjs";
 import { writeJsonResults, writeSummaryMd } from "./corpus-format.mjs";
 
 const argv = process.argv.slice(2);
@@ -53,7 +54,12 @@ const MAX_NOPROGRESS = parseInt(process.env.MAX_NOPROGRESS || "", 10) || 4;
 const outDir = resolve(process.cwd(), process.env.OUT || "results");
 const { progressPath, inflightPath, resultsPath, summaryPath } = outPaths(outDir);
 
-const cfg = { filters, limit: LIMIT, timeout: TIMEOUT, concurrency: CONCURRENCY, outDir };
+// --manifest=<file> runs exactly the ids in that file (one per line, # comments);
+// otherwise the positional substring filters select the set.
+const MANIFEST = opts.find((a) => a.startsWith("--manifest="))?.slice(11);
+const listFile = MANIFEST ? resolve(process.cwd(), MANIFEST) : null;
+const cfg = { filters, limit: LIMIT, timeout: TIMEOUT, concurrency: CONCURRENCY, outDir, listFile };
+const ALL = resolveTestSet({ listFile, filters, limit: LIMIT });
 
 function usage() {
   console.log(readFileSync(new URL(import.meta.url), "utf8")
@@ -100,7 +106,7 @@ function spawnWorker() {
 
 function writeOutputs(startedAt) {
   const ledger = readLedger(progressPath);
-  const all = selectTests(filters, LIMIT);
+  const all = ALL;
   const results = all.filter((t) => ledger.has(t)).map((t) => ledger.get(t));
   const summary = writeJsonResults(resultsPath, results, startedAt, Date.now());
   writeSummaryMd(summaryPath, summary);
@@ -133,7 +139,7 @@ async function runWorkerOnce() {
 async function main() {
   if (HELP) { usage(); return; }
   mkdirSync(outDir, { recursive: true });
-  const all = selectTests(filters, LIMIT);
+  const all = ALL;
 
   if (LIST_ONLY) {
     for (const t of all) console.log(t);

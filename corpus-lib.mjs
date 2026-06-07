@@ -51,6 +51,30 @@ export function readLedger(progressPath) {
   return map;
 }
 
+// Normalize a list/manifest file (one id per line, `#` comments) to canonical
+// test-*.js ids. Accepts test-foo.js | test-foo | foo.
+export function idsFromListFile(path) {
+  const out = [];
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    let s = line.replace(/#.*$/, "").trim();
+    if (!s) continue;
+    if (!s.endsWith(".js")) s += ".js";
+    if (!s.startsWith("test-")) s = "test-" + s;
+    out.push(s);
+  }
+  return out;
+}
+
+// Resolve the test set: an explicit manifest (listFile) wins over substring
+// filters. Only returns ids that actually exist in test/parallel, deduped+sorted.
+export function resolveTestSet({ listFile, filters = [], limit = 0 }) {
+  if (listFile) {
+    const ids = idsFromListFile(listFile).filter((id) => existsSync(resolve(parallelDir, id)));
+    return [...new Set(ids)].sort();
+  }
+  return selectTests(filters, limit);
+}
+
 // Read inflight.json → array of { test, startedAt, pid }. Tolerant of the older
 // plain-string form and of a partial write.
 export function readInflight(inflightPath) {
