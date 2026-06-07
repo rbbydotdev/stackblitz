@@ -1,0 +1,24 @@
+net-harness.mjs
+  s_aae3c9af80648f::t_888c77cec53357 151
+  s_aae3c9af80648f::t_a8c4ea5717e8b5 96-97,100-103
+  s_aae3c9af80648f::t_ea00ef6fb97b06 172
+  s_aae3c9af80648f::t_a47cd763d9bf2a 104
+  s_aae3c9af80648f::t_61149e75623eb6 109
+  s_aae3c9af80648f::t_be5262f4303e3c 1-59,61-64,66-69,71-74,76-95,99,105-108,110-123,125-130,132-135,137-149,152-171
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "cf1b032ed565b50ec59fb12f93e420bde644bf9c",
+  "prompts": {},
+  "sessions": {
+    "s_aae3c9af80648f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "afd75176-0900-4d50-a63c-e6b32e4da053",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
