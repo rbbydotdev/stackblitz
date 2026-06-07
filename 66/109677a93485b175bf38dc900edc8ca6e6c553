@@ -1,0 +1,30 @@
+net-timeouts.txt
+  s_aae3c9af80648f::t_5312d80a8c0c12 1-2,4-258
+  s_aae3c9af80648f::t_09a3f4a1c2cf67 3
+corpus-lib.mjs
+  s_aae3c9af80648f::t_b67edbf162d562 54-77
+corpus-worker.mjs
+  s_aae3c9af80648f::t_98ab3525a804ec 99
+  s_aae3c9af80648f::t_b8e3bc4de6bd87 14,17
+run-corpus.mjs
+  s_aae3c9af80648f::t_87a48d37a2225a 109,142
+  s_aae3c9af80648f::t_66042f819c3019 21
+  s_aae3c9af80648f::t_c5e95f7a6cc139 57-62
+  s_aae3c9af80648f::t_a40d6cb05d641a 39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "66109677a93485b175bf38dc900edc8ca6e6c553",
+  "prompts": {},
+  "sessions": {
+    "s_aae3c9af80648f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "afd75176-0900-4d50-a63c-e6b32e4da053",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
