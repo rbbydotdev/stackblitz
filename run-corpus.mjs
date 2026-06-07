@@ -164,6 +164,14 @@ async function main() {
   const startedAt = Date.now();
   let noProgressCycles = 0;
 
+  // Loud guard: if everything is already in this OUT's ledger, we'd silently
+  // replay cached results (the classic "it just skipped them all" surprise).
+  if (all.length && all.every((t) => readLedger(progressPath).has(t))) {
+    console.log(`[supervisor] all ${all.length} selected test(s) are ALREADY recorded in ${outDir}/progress.jsonl`);
+    console.log(`[supervisor] → nothing re-executed (results below are CACHED). To actually re-run:`);
+    console.log(`[supervisor]   FRESH=1 node run-corpus.mjs ...   (wipe this ledger), or  OUT=<newdir> ...`);
+  }
+
   while (true) {
     const done = readLedger(progressPath);
     const remaining = all.filter((t) => !done.has(t));
