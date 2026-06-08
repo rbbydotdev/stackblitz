@@ -1,0 +1,19 @@
+introspect-probe.mjs
+  s_06b7cebdcc812f::t_cd9b72254b421b 243-276
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "eee7779beb67afdcbade298562536aaf3eb6bda7",
+  "prompts": {},
+  "sessions": {
+    "s_06b7cebdcc812f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7a4c681f-d1b4-40e3-8dba-5c794c95a0ea",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
