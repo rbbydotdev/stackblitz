@@ -240,5 +240,39 @@ safe('vm', () => {
   return out;
 });
 
+// ---------- 5. ENGINE DISCRIMINATOR: browser-V8 (JS-faked embedder) vs V8-in-WASM ----------
+// Perf: jitless V8-in-WASM runs hot numeric code ~10-30x slower than native-JIT browser V8.
+safe('perf', () => {
+  const fib = (n) => (n < 2 ? n : fib(n - 1) + fib(n - 2));
+  const t0 = performance.now();
+  let x = 0; for (let i = 0; i < 1e8; i++) { x += i % 7; }
+  const loopMs = performance.now() - t0;
+  const t1 = performance.now(); const f = fib(34); const fibMs = performance.now() - t1;
+  return { loop1e8Ms: Math.round(loopMs), fib34Ms: Math.round(fibMs), fib34: f, x };
+});
+
+// Promise-hook coverage: real V8 SetPromiseHook sees ALL promises incl. async-fn-internal
+// ones; a JS global-Promise wrapper only sees promises made via the global Promise.
+safe('engineDiscriminator', () => {
+  const out = {};
+  out.promiseNative = fnInfo(Promise).native;
+  out.promiseCtorMatch = (() => { try { return Promise.resolve().constructor === Promise; } catch { return null; } })();
+  out.asyncFnReturnsGlobalPromise = (() => { try { const p = (async () => {})(); const r = { isGlobalPromise: p.constructor === Promise, ctorName: p.constructor && p.constructor.name, ctorNative: fnInfo(p.constructor).native }; p.catch(() => {}); return r; } catch (e) { return String(e); } })();
+  safeInto(out, 'hookCoverage', async () => {
+    const async_hooks = require('node:async_hooks');
+    const counts = { explicitThen: 0, newPromise: 0, asyncFn: 0, other: 0 };
+    let mode = 'other';
+    const hook = async_hooks.createHook({ init: (id, type) => { if (type === 'PROMISE') counts[mode]++; } }).enable();
+    mode = 'explicitThen'; Promise.resolve().then(() => {});
+    mode = 'newPromise'; new Promise((r) => r());
+    mode = 'asyncFn'; await (async () => { await 0; await 0; await 0; })();
+    mode = 'other';
+    hook.disable();
+    // interpretation: asyncFn>0 => real V8 hooks; asyncFn==0 while explicitThen>0 => JS Promise-wrapper fake
+    return { ...counts, verdict: counts.asyncFn > 0 ? 'real-V8-hooks' : (counts.explicitThen > 0 ? 'JS-Promise-wrapper-fake' : 'inconclusive') };
+  });
+  return out;
+});
+
 await Promise.all(pending);   // settle async sub-probes queued during the synchronous safe() blocks
 process.stdout.write(JSON.stringify(R, null, 2));
