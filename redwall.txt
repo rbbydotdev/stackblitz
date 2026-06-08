@@ -1,0 +1,31 @@
+# redwall.txt — the ~12 RED-wall tests that (per edge's verdict) need V8 embedder
+# APIs unavailable to browser JS, yet WC's gap list marks them WC-PASS / edge-FAIL.
+# Run by introspect-serve.mjs to confirm ground-truth pass/fail inside WebContainer.
+
+# --- bucket 1: promise hooks (V8 SetPromiseHook) ---
+test-promise-hook-create-hook
+test-promise-hook-on-init
+test-promise-hook-on-before
+test-promise-hook-on-after
+test-promise-hook-on-resolve
+test-async-hooks-promise
+test-async-hooks-promise-enable-disable
+test-async-hooks-promise-triggerid
+test-async-hooks-enable-before-promise-resolve
+test-async-hooks-enable-during-promise
+test-async-hooks-disable-during-promise
+test-async-wrap-promise-after-enabled
+
+# --- bucket 2: vm realms / modules (ModuleWrap / contextify) ---
+test-vm-module-synthetic
+test-vm-module-import-meta
+test-vm-module-reevaluate
+test-vm-module-cached-data
+test-vm-module-evaluate-while-evaluating
+test-vm-dynamic-import-callback-missing-flag
+# baseline contrast (does WC's vm-module work at all?):
+test-vm-module-basic
+test-vm-module-link
+
+# --- bucket 3: gc + WeakReference (V8 weak globals) ---
+test-internal-util-weakreference
