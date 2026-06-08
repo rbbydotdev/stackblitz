@@ -46,6 +46,22 @@ function fsScout() {
   return out;
 }
 
+async function flagMatrix() {
+  const out = {};
+  const combos = [[], ['--expose-gc'], ['--expose-gc', '--experimental-vm-modules'], ['--expose-internals', '--expose-gc'], ['--expose-internals', '--expose-gc', '--experimental-vm-modules']];
+  for (const c of combos) {
+    const { out: o, err } = await run([...c, '-e', 'console.log(JSON.stringify({gc:typeof global.gc, weakref:typeof WeakRef, finreg:typeof FinalizationRegistry}))'], { timeout: 8000 });
+    out[c.join(' ') || '(none)'] = (o || err).trim().slice(0, 200);
+  }
+  // Is an unhandled rejection fatal in WC? (if not, gc-missing tests "pass" falsely)
+  const rej = await run(['-e', 'Promise.reject(new Error("UNHANDLED_PROBE")); setTimeout(()=>console.log("SURVIVED"),100)'], { timeout: 8000 });
+  out['__unhandledRejection'] = { exit: rej.code, killed: rej.killed, stdoutTail: rej.out.slice(-120), stderrTail: rej.err.slice(-200) };
+  // What does calling a missing global.gc() do to exit code?
+  const gcm = await run(['--expose-internals', '--expose-gc', '--experimental-vm-modules', '-e', '(async()=>{ if(typeof global.gc!=="function"){console.log("NO_GC"); await global.gc(); } })().then(()=>console.log("OK")); setTimeout(()=>console.log("END"),100)'], { timeout: 8000 });
+  out['__gcMissingCall'] = { exit: gcm.code, stdoutTail: gcm.out.slice(-160), stderrTail: gcm.err.slice(-200) };
+  return out;
+}
+
 let REPORT = {
   status: 'RUNNING', startedAt: new Date().toISOString(),
   env: { node: process.version, versions: process.versions, execPath: process.execPath, fsScout: fsScout() },
@@ -59,6 +75,12 @@ const save = () => { try { mkdirSync(resolve(here, 'results'), { recursive: true
   const { out, err, code, killed } = await run([...PROBE_FLAGS, resolve(here, 'introspect-probe.mjs')], { timeout: 35000 });
   try { REPORT.probe = JSON.parse(out); }
   catch { REPORT.probe = { __probeError: true, killed, exit: code, stdoutTail: out.slice(-3000), stderrTail: err.slice(-1500) }; }
+  save();
+
+  // flag-matrix: which flag combo yields global.gc, and is an unhandled
+  // rejection fatal? (settles why test-internal-util-weakreference passes.)
+  REPORT.progress = 'flag matrix';
+  REPORT.flagMatrix = await flagMatrix();
   save();
 
   // 2) RED-wall tests, ground-truth pass/fail, served incrementally.
