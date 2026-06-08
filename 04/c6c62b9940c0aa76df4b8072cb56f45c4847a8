@@ -1,0 +1,20 @@
+introspect-serve.mjs
+  s_06b7cebdcc812f::t_7791502129dfea 49-64
+  s_06b7cebdcc812f::t_8fc4c714d211c3 80-85
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "04c6c62b9940c0aa76df4b8072cb56f45c4847a8",
+  "prompts": {},
+  "sessions": {
+    "s_06b7cebdcc812f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7a4c681f-d1b4-40e3-8dba-5c794c95a0ea",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
