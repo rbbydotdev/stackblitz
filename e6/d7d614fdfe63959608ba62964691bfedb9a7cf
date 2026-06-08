@@ -1,0 +1,30 @@
+redwall.txt
+  s_06b7cebdcc812f::t_ac7fa805258d2c 1-31
+introspect-probe.mjs
+  s_06b7cebdcc812f::t_027451c84bf8e8 23,25-32
+  s_06b7cebdcc812f::t_693c82853bf06f 238
+  s_06b7cebdcc812f::t_120303fc81f558 1-22,24,33-93,95,97-237,239
+  s_06b7cebdcc812f::t_600f763a25c9ab 94,96
+introspect-serve.mjs
+  s_06b7cebdcc812f::t_ca0baeb02bc424 1-87
+.stackblitzrc
+  s_06b7cebdcc812f::t_be6fcb6c89cc4b 3
+.gitignore
+  ai_agent 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "e6d7d614fdfe63959608ba62964691bfedb9a7cf",
+  "prompts": {},
+  "sessions": {
+    "s_06b7cebdcc812f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7a4c681f-d1b4-40e3-8dba-5c794c95a0ea",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
