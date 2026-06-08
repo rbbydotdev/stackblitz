@@ -37,6 +37,11 @@ const fnInfo = (f) => {
   const native = /\{\s*\[native code\]\s*\}/.test(s);
   return { native, len: s.length, src: native ? s : s.slice(0, 4000) };
 };
+// gc() may be sync, async, or (in a reimpl) never resolve — cap every call.
+const gcOnce = () => Promise.race([
+  Promise.resolve().then(() => (typeof globalThis.gc === 'function' ? globalThis.gc() : undefined)),
+  new Promise((r) => setTimeout(r, 2000)),
+]);
 const dumpFns = (obj, names) => {
   const out = {};
   for (const n of names) { try { out[n] = fnInfo(obj && obj[n]); } catch (e) { out[n] = { __error: String(e) }; } }
@@ -152,7 +157,7 @@ safe('gc', () => {
     let collectedAt = -1;
     for (let i = 0; i < 10; i++) {
       await new Promise((r) => setImmediate(r));
-      await globalThis.gc();
+      await gcOnce();
       if (ref.deref() === undefined) { collectedAt = i; break; }
     }
     return { collected: collectedAt >= 0, iterations: collectedAt };
@@ -171,7 +176,7 @@ safe('gc', () => {
     obj = null;
     if (typeof globalThis.gc === 'function') {
       let at = -1;
-      for (let i = 0; i < 10; i++) { await new Promise((r) => setImmediate(r)); await globalThis.gc(); if (ref.get() === undefined) { at = i; break; } }
+      for (let i = 0; i < 10; i++) { await new Promise((r) => setImmediate(r)); await gcOnce(); if (ref.get() === undefined) { at = i; break; } }
       info.collected = at >= 0; info.iterations = at;
     } else info.collected = 'no global.gc';
     return info;

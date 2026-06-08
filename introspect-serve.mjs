@@ -3,11 +3,15 @@
 // readable channel; the xterm terminal is a canvas). Set as the .stackblitzrc
 // startCommand so it auto-runs on tab load.
 //
-// It (1) runs each RED-wall test as its own `node <flags> <test>` subprocess to
-// get GROUND-TRUTH pass/fail (the gap list says WC passes these — confirm it),
-// (2) runs introspect-probe.mjs with the embedder flags to capture HOW, and
-// (3) serves the merged JSON. `?file=<path>` downloads any container source file
-// (e.g. node_modules deps, or paths surfaced in the probe stack traces).
+// Robustness lessons from WC: child.kill() can't always terminate a wedged
+// child, so run() MUST resolve on its own timeout (never wait only on `close`).
+// And the probe (the HOW) is the crown jewel, so we run it FIRST and serve
+// incrementally — a later test that wedges WC can't cost us the probe data.
+//
+// It (1) runs introspect-probe.mjs with the embedder flags to capture HOW, then
+// (2) runs each RED-wall test as its own `node <flags> <test>` subprocess for
+// GROUND-TRUTH pass/fail, updating the served report after each. `?file=<path>`
+// downloads any container source file.
 import { spawn } from 'node:child_process';
 import http from 'node:http';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
@@ -15,39 +19,21 @@ import { resolve } from 'node:path';
 import { here, parallelDir, idsFromListFile, parseFlags } from './corpus-lib.mjs';
 
 const PROBE_FLAGS = ['--expose-internals', '--expose-gc', '--experimental-vm-modules'];
-const TEST_TIMEOUT = 20000;
 
-function run(args, { cwd = here, timeout = TEST_TIMEOUT } = {}) {
+// Resolve on close OR on timeout (WC kill is unreliable; never hang on `close`).
+function run(args, { cwd = here, timeout = 12000 } = {}) {
   return new Promise((res) => {
-    const c = spawn(process.execPath, args, { cwd });
-    let out = '', err = '', killed = false;
-    const t = setTimeout(() => { killed = true; try { c.kill('SIGKILL'); } catch {} }, timeout);
+    let out = '', err = '', done = false;
+    const finish = (r) => { if (!done) { done = true; clearTimeout(t); res(r); } };
+    let c;
+    try { c = spawn(process.execPath, args, { cwd }); }
+    catch (e) { return finish({ code: -1, out, err: String(e), killed: false }); }
+    const t = setTimeout(() => { try { c.kill('SIGKILL'); } catch {} finish({ code: null, out, err, killed: true }); }, timeout);
     c.stdout.on('data', (d) => { out += d; });
     c.stderr.on('data', (d) => { err += d; });
-    c.on('close', (code) => { clearTimeout(t); res({ code, out, err, killed }); });
-    c.on('error', (e) => { clearTimeout(t); res({ code: -1, out, err: String(e), killed }); });
+    c.on('close', (code) => finish({ code, out, err, killed: false }));
+    c.on('error', (e) => finish({ code: -1, out, err: err + String(e), killed: false }));
   });
-}
-
-async function runRedwallTests() {
-  const manifest = resolve(here, 'redwall.txt');
-  const ids = idsFromListFile(manifest).filter((id) => existsSync(resolve(parallelDir, id)));
-  const results = [];
-  for (const id of ids) {
-    const file = resolve(parallelDir, id);
-    const flags = parseFlags(readFileSync(file, 'utf8'));
-    const { code, err, killed } = await run([...flags, file]);
-    results.push({
-      test: id, flags, exit: code, status: killed ? 'TIMEOUT' : (code === 0 ? 'PASS' : 'FAIL'),
-      stderrTail: err ? err.slice(-1400) : '',
-    });
-  }
-  return results;
-}
-
-async function runProbe() {
-  const { out, err, code } = await run([...PROBE_FLAGS, resolve(here, 'introspect-probe.mjs')], { timeout: 30000 });
-  try { return JSON.parse(out); } catch { return { __probeError: 'non-JSON output', exit: code, stdoutTail: out.slice(-2000), stderrTail: err.slice(-2000) }; }
 }
 
 // Scout where WC keeps its node runtime on the virtual FS (for "download code").
@@ -60,17 +46,38 @@ function fsScout() {
   return out;
 }
 
-let REPORT = { status: 'RUNNING', startedAt: new Date().toISOString() };
+let REPORT = {
+  status: 'RUNNING', startedAt: new Date().toISOString(),
+  env: { node: process.version, versions: process.versions, execPath: process.execPath, fsScout: fsScout() },
+  probe: { __pending: true }, tests: [], progress: 'starting',
+};
+const save = () => { try { mkdirSync(resolve(here, 'results'), { recursive: true }); writeFileSync(resolve(here, 'results', 'introspect.json'), JSON.stringify(REPORT, null, 2)); } catch {} };
 
 (async () => {
-  const env = { node: process.version, versions: process.versions, execPath: process.execPath, fsScout: fsScout() };
-  const [tests, probe] = await Promise.all([runRedwallTests(), runProbe()]);
-  const pass = tests.filter((t) => t.status === 'PASS').length;
-  REPORT = { status: 'DONE', finishedAt: new Date().toISOString(), env,
-    summary: { tests: tests.length, pass, fail: tests.length - pass }, tests, probe };
-  try { mkdirSync(resolve(here, 'results'), { recursive: true }); writeFileSync(resolve(here, 'results', 'introspect.json'), JSON.stringify(REPORT, null, 2)); } catch {}
-  console.log(`introspect done: ${pass}/${tests.length} RED-wall tests pass in WC`);
-})().catch((e) => { REPORT = { status: 'ERROR', error: String(e && e.stack || e) }; });
+  // 1) PROBE FIRST (the mechanism). 35s cap; resolves even if a gc() probe wedges.
+  REPORT.progress = 'running probe';
+  const { out, err, code, killed } = await run([...PROBE_FLAGS, resolve(here, 'introspect-probe.mjs')], { timeout: 35000 });
+  try { REPORT.probe = JSON.parse(out); }
+  catch { REPORT.probe = { __probeError: true, killed, exit: code, stdoutTail: out.slice(-3000), stderrTail: err.slice(-1500) }; }
+  save();
+
+  // 2) RED-wall tests, ground-truth pass/fail, served incrementally.
+  const ids = idsFromListFile(resolve(here, 'redwall.txt')).filter((id) => existsSync(resolve(parallelDir, id)));
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i];
+    REPORT.progress = `tests ${i + 1}/${ids.length}: ${id}`;
+    const file = resolve(parallelDir, id);
+    const flags = parseFlags(readFileSync(file, 'utf8'));
+    const { code: c2, err: e2, killed: k2 } = await run([...flags, file], { timeout: 12000 });
+    REPORT.tests.push({ test: id, flags, exit: c2, status: k2 ? 'TIMEOUT' : (c2 === 0 ? 'PASS' : 'FAIL'), stderrTail: e2 ? e2.slice(-1200) : '' });
+    save();
+  }
+  const pass = REPORT.tests.filter((t) => t.status === 'PASS').length;
+  REPORT.summary = { tests: REPORT.tests.length, pass, fail: REPORT.tests.length - pass };
+  REPORT.status = 'DONE'; REPORT.finishedAt = new Date().toISOString(); REPORT.progress = 'done';
+  save();
+  console.log(`introspect done: ${pass}/${REPORT.tests.length} RED-wall tests pass in WC`);
+})().catch((e) => { REPORT.status = 'ERROR'; REPORT.error = String(e && e.stack || e); save(); });
 
 http.createServer((q, r) => {
   try {
